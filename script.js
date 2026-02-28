@@ -1,6 +1,6 @@
 "use strict";
 
-import { db, ref, set, onValue, update } from "./firebase.js";
+import { db, ref, set, onValue, update, onDisconnect } from "./firebase.js";
 
 // Elements
 const waitingScreen = document.getElementById("waiting-screen");
@@ -29,31 +29,52 @@ let playing = true;
 const gameRef = ref(db, "pigGame/state");
 const playersRef = ref(db, "pigGame/players");
 
-// --- 1. THE ASSIGNMENT (FIXED) ---
+// --- 1. PLAYER ASSIGNMENT & DISCONNECT LOGIC ---
 onValue(playersRef, (snapshot) => {
   const players = snapshot.val() || {};
-  const savedID = sessionStorage.getItem("playerAssigned");
+  let savedID = sessionStorage.getItem("playerAssigned");
+
+  // Validate session: If browser thinks it's a player but DB says otherwise, reset
+  if (savedID === "0" && !players.player0) {
+    sessionStorage.removeItem("playerAssigned");
+    savedID = null;
+  }
+  if (savedID === "1" && !players.player1) {
+    sessionStorage.removeItem("playerAssigned");
+    savedID = null;
+  }
 
   if (savedID === null) {
     if (!players.player0) {
       update(playersRef, { player0: true });
       playerNumber = 0;
       sessionStorage.setItem("playerAssigned", "0");
+      // Tell Firebase: "When I disconnect, delete my player0 key"
+      onDisconnect(ref(db, "pigGame/players/player0")).remove();
     } else if (!players.player1) {
       update(playersRef, { player1: true });
       playerNumber = 1;
       sessionStorage.setItem("playerAssigned", "1");
+      // Tell Firebase: "When I disconnect, delete my player1 key"
+      onDisconnect(ref(db, "pigGame/players/player1")).remove();
+    } else {
+      waitingText.textContent =
+        "Game is full! Use Reset All if this is an error.";
+      return;
     }
   } else {
     playerNumber = Number(savedID);
+    // Ensure onDisconnect is still active even on refresh
+    onDisconnect(ref(db, `pigGame/players/player${playerNumber}`)).remove();
   }
 
-  // FORCE LABELS
+  // Update Labels
   document.getElementById("name--0").textContent =
     playerNumber === 0 ? "P1 (YOU)" : "Player 1";
   document.getElementById("name--1").textContent =
     playerNumber === 1 ? "P2 (YOU)" : "Player 2";
 
+  // Check if we can start
   if (players.player0 && players.player1) {
     waitingScreen.classList.add("hidden");
   } else {
@@ -65,7 +86,7 @@ onValue(playersRef, (snapshot) => {
   }
 });
 
-// --- 2. THE SYNC (FIXED) ---
+// --- 2. GAME STATE SYNC ---
 onValue(gameRef, (snapshot) => {
   const state = snapshot.val();
   if (!state) {
@@ -75,10 +96,10 @@ onValue(gameRef, (snapshot) => {
 
   scores = state.scores || [0, 0];
   currentScore = state.currentScore || 0;
-  activePlayer = state.activePlayer;
-  playing = state.playing;
+  activePlayer = state.activePlayer ?? 0;
+  playing = state.playing ?? true;
 
-  // UI Updates
+  // Update UI
   score0El.textContent = scores[0];
   score1El.textContent = scores[1];
   current0El.textContent = activePlayer === 0 ? currentScore : 0;
@@ -90,23 +111,18 @@ onValue(gameRef, (snapshot) => {
     diceOne.classList.toggle("hidden", state.dice !== 1);
   } else {
     diceEl.classList.add("hidden");
+    diceOne.classList.add("hidden");
   }
 
   player0El.classList.toggle("player--active", activePlayer === 0);
   player1El.classList.toggle("player--active", activePlayer === 1);
 
-  // --- THE BUTTON LOCK FIX ---
-  // Re-read playerNumber from session storage to be 100% sure
-  const myID = Number(sessionStorage.getItem("playerAssigned"));
-  const isMyTurn = myID === activePlayer && playing;
-
-  // Directly modifying properties to bypass any CSS blocks
+  // TURN ENFORCEMENT
+  const isMyTurn = playerNumber === activePlayer && playing;
   btnRoll.disabled = !isMyTurn;
   btnHold.disabled = !isMyTurn;
-  btnRoll.style.opacity = isMyTurn ? "1" : "0.2";
-  btnHold.style.opacity = isMyTurn ? "1" : "0.2";
-  btnRoll.style.pointerEvents = isMyTurn ? "auto" : "none";
-  btnHold.style.pointerEvents = isMyTurn ? "auto" : "none";
+  btnRoll.style.opacity = isMyTurn ? "1" : "0.3";
+  btnHold.style.opacity = isMyTurn ? "1" : "0.3";
 
   if (!playing) {
     const winner = scores[0] >= 100 ? 0 : 1;
@@ -123,30 +139,21 @@ function syncState(dice = null) {
   set(gameRef, { scores, currentScore, activePlayer, playing, dice });
 }
 
-// --- 3. THE ACTIONS (FIXED) ---
+// --- 3. ACTIONS ---
 btnRoll.addEventListener("click", () => {
-  // Triple-check: Grab the ID directly from session at the moment of the click
-  const myActualID = Number(sessionStorage.getItem("playerAssigned"));
-  if (!playing || myActualID !== activePlayer) {
-    console.log("Action blocked: Not your turn.");
-    return;
-  }
-
+  if (!playing || playerNumber !== activePlayer) return;
   const dice = Math.trunc(Math.random() * 6) + 1;
   if (dice !== 1) {
     currentScore += dice;
-    syncState(dice);
   } else {
     currentScore = 0;
     activePlayer = activePlayer === 0 ? 1 : 0;
-    syncState(1);
   }
+  syncState(dice);
 });
 
 btnHold.addEventListener("click", () => {
-  const myActualID = Number(sessionStorage.getItem("playerAssigned"));
-  if (!playing || myActualID !== activePlayer) return;
-
+  if (!playing || playerNumber !== activePlayer) return;
   scores[activePlayer] += currentScore;
   if (scores[activePlayer] >= 100) {
     playing = false;
@@ -165,7 +172,9 @@ btnNew.addEventListener("click", () => {
   syncState(null);
 });
 
+// --- 4. ULTIMATE RESET ---
 const fullReset = () => {
+  // Wipes EVERYTHING in pigGame node
   set(ref(db, "pigGame"), null);
   sessionStorage.clear();
   window.location.reload();

@@ -5,6 +5,7 @@ import {
   set,
   onValue,
   update,
+  onDisconnect,
 } from "https://www.gstatic.com/firebasejs/12.10.0/firebase-database.js";
 
 const firebaseConfig = {
@@ -21,4 +22,4 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const db = getDatabase(app);
 
-export { db, ref, set, onValue, update };
+export { db, ref, set, onValue, update, onDisconnect };
