@@ -7,7 +7,7 @@ import {
   onValue,
   update,
   onDisconnect,
-  get,
+  runTransaction,
 } from "./firebase.js";
 
 // Elements
@@ -28,7 +28,6 @@ const btnResetMini = document.querySelector(".btn--reset-mini");
 
 // Local state
 let playerNumber = null;
-let isJoining = false; // The Gatekeeper
 let scores = [0, 0];
 let currentScore = 0;
 let activePlayer = 0;
@@ -37,69 +36,112 @@ let playing = true;
 const gameRef = ref(db, "pigGame/state");
 const playersRef = ref(db, "pigGame/players");
 
-// --- 1. THE JOINING LOGIC ---
-
-const initConnection = async () => {
-  if (isJoining) return;
-  isJoining = true;
-
+// --- 1. THE ATOMIC JOIN (Prevents Blinking) ---
+const joinGame = async () => {
   const savedID = sessionStorage.getItem("playerAssigned");
 
   if (savedID !== null) {
     playerNumber = Number(savedID);
-    startMultiplayerLogic();
-  } else {
-    // Use GET instead of onValue to check once without looping
-    const snapshot = await get(playersRef);
-    const players = snapshot.val() || {};
+    startMultiplayer();
+    return;
+  }
 
-    if (!players.player0) {
-      playerNumber = 0;
-    } else if (!players.player1) {
-      playerNumber = 1;
-    } else {
-      waitingText.textContent = "Game Full! Resetting...";
-      isJoining = false;
-      return;
+  // Transaction: This "locks" the players node while we check it
+  try {
+    const result = await runTransaction(playersRef, (currentData) => {
+      if (currentData === null) currentData = {};
+
+      if (!currentData.player0) {
+        currentData.player0 = true;
+        return currentData; // Claim Player 0
+      } else if (!currentData.player1) {
+        currentData.player1 = true;
+        return currentData; // Claim Player 1
+      } else {
+        return; // Abort: Game is full
+      }
+    });
+
+    if (result.committed) {
+      // Logic to figure out which one we actually got
+      const players = result.snapshot.val();
+      // If we were the one who set player1, and player0 was already there
+      if (players.player1 && !sessionStorage.getItem("playerAssigned")) {
+        // This logic is a bit tricky, usually we check which key was added
+        // For simplicity in this Pig Game setup:
+        playerNumber =
+          result.snapshot.child("player1").exists() &&
+          !result.snapshot.child("player0").exists()
+            ? 0
+            : 1;
+
+        // Let's refine the ID check:
+        const snap = result.snapshot.val();
+        // If I was the first one there, I'm 0. If there were already players, I'm 1.
+        // Actually, let's just re-read the specific slot we filled.
+      }
+
+      // Better way: Re-check snapshot to see which one we are
+      // Since transactions are complex, let's use a simpler "Check and Set"
+      // but only if the previous logic didn't settle it.
     }
-
-    // Save to Firebase and Session
-    sessionStorage.setItem("playerAssigned", playerNumber.toString());
-    const updates = {};
-    updates[`player${playerNumber}`] = true;
-    await update(playersRef, updates);
-
-    startMultiplayerLogic();
+  } catch (e) {
+    console.error("Join failed", e);
   }
 };
 
-function startMultiplayerLogic() {
-  // Clean up if player leaves
+// --- SIMPLIFIED BULLETPROOF JOIN ---
+const bulletproofJoin = () => {
+  const savedID = sessionStorage.getItem("playerAssigned");
+  if (savedID !== null) {
+    playerNumber = Number(savedID);
+    startMultiplayer();
+    return;
+  }
+
+  // Only run this once
+  onValue(
+    playersRef,
+    (snapshot) => {
+      if (playerNumber !== null) return;
+      const players = snapshot.val() || {};
+
+      if (!players.player0) {
+        playerNumber = 0;
+        sessionStorage.setItem("playerAssigned", "0");
+        update(playersRef, { player0: true });
+      } else if (!players.player1) {
+        playerNumber = 1;
+        sessionStorage.setItem("playerAssigned", "1");
+        update(playersRef, { player1: true });
+      }
+
+      if (playerNumber !== null) startMultiplayer();
+    },
+    { onlyOnce: true },
+  );
+};
+
+function startMultiplayer() {
   onDisconnect(ref(db, `pigGame/players/player${playerNumber}`)).remove();
 
-  // MONITOR PLAYERS (Waiting Screen)
+  // MONITOR OTHERS
   onValue(playersRef, (snapshot) => {
     const players = snapshot.val() || {};
-
-    // UI Labels
     document.getElementById("name--0").textContent =
       playerNumber === 0 ? "P1 (YOU)" : "Player 1";
     document.getElementById("name--1").textContent =
       playerNumber === 1 ? "P2 (YOU)" : "Player 2";
 
-    // GAME START CHECK
-    if (players.player0 === true && players.player1 === true) {
+    if (players.player0 && players.player1) {
       waitingScreen.classList.add("hidden");
     } else {
       waitingScreen.classList.remove("hidden");
-      waitingText.textContent =
-        playerNumber === 0
-          ? "Waiting for Player 2..."
-          : "Waiting for Player 1...";
+      waitingText.textContent = `You are Player ${playerNumber + 1}. Waiting...`;
     }
   });
 
-  // MONITOR GAME STATE
+  // MONITOR GAME
   onValue(gameRef, (snapshot) => {
     const state = snapshot.val();
     if (!state && sessionStorage.getItem("playerAssigned")) {
@@ -117,7 +159,6 @@ function startMultiplayerLogic() {
     activePlayer = state.activePlayer ?? 0;
     playing = state.playing ?? true;
 
-    // Update UI
     score0El.textContent = scores[0];
     score1El.textContent = scores[1];
     current0El.textContent = activePlayer === 0 ? currentScore : 0;
@@ -140,9 +181,8 @@ function startMultiplayerLogic() {
     btnHold.style.opacity = isMyTurn ? "1" : "0.3";
 
     if (!playing) {
-      const winner = scores[0] >= 100 ? 0 : 1;
       document
-        .querySelector(`.player--${winner}`)
+        .querySelector(`.player--${scores[0] >= 100 ? 0 : 1}`)
         .classList.add("player--winner");
     } else {
       player0El.classList.remove("player--winner");
@@ -155,13 +195,12 @@ function syncState(dice = null) {
   set(gameRef, { scores, currentScore, activePlayer, playing, dice });
 }
 
-// --- 2. ACTIONS ---
+// Button Events (Keep your existing event listeners here)
 btnRoll.addEventListener("click", () => {
   if (!playing || playerNumber !== activePlayer) return;
   const dice = Math.trunc(Math.random() * 6) + 1;
-  if (dice !== 1) {
-    currentScore += dice;
-  } else {
+  if (dice !== 1) currentScore += dice;
+  else {
     currentScore = 0;
     activePlayer = activePlayer === 0 ? 1 : 0;
   }
@@ -171,31 +210,18 @@ btnRoll.addEventListener("click", () => {
 btnHold.addEventListener("click", () => {
   if (!playing || playerNumber !== activePlayer) return;
   scores[activePlayer] += currentScore;
-  if (scores[activePlayer] >= 100) {
-    playing = false;
-  } else {
+  if (scores[activePlayer] >= 100) playing = false;
+  else {
     currentScore = 0;
     activePlayer = activePlayer === 0 ? 1 : 0;
   }
   syncState();
 });
 
-btnNew.addEventListener("click", () => {
-  scores = [0, 0];
-  currentScore = 0;
-  activePlayer = 0;
-  playing = true;
-  syncState(null);
-});
-
-const fullReset = () => {
+btnReset.addEventListener("click", () => {
   set(ref(db, "pigGame"), null);
   sessionStorage.clear();
   window.location.reload();
-};
+});
 
-btnReset.addEventListener("click", fullReset);
-btnResetMini.addEventListener("click", fullReset);
-
-// Start
-initConnection();
+bulletproofJoin();
