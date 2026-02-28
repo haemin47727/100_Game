@@ -29,12 +29,12 @@ let playing = true;
 const gameRef = ref(db, "pigGame/state");
 const playersRef = ref(db, "pigGame/players");
 
-// --- 1. PLAYER ASSIGNMENT & DISCONNECT LOGIC ---
+// --- 1. PLAYER ASSIGNMENT & DISCONNECT ---
 onValue(playersRef, (snapshot) => {
   const players = snapshot.val() || {};
   let savedID = sessionStorage.getItem("playerAssigned");
 
-  // Validate session: If browser thinks it's a player but DB says otherwise, reset
+  // If DB was reset but we have a saved ID, clear the local session
   if (savedID === "0" && !players.player0) {
     sessionStorage.removeItem("playerAssigned");
     savedID = null;
@@ -46,35 +46,34 @@ onValue(playersRef, (snapshot) => {
 
   if (savedID === null) {
     if (!players.player0) {
-      update(playersRef, { player0: true });
       playerNumber = 0;
       sessionStorage.setItem("playerAssigned", "0");
-      // Tell Firebase: "When I disconnect, delete my player0 key"
+      update(playersRef, { player0: true });
+      // CRITICAL: Set up disconnect hook immediately
       onDisconnect(ref(db, "pigGame/players/player0")).remove();
     } else if (!players.player1) {
-      update(playersRef, { player1: true });
       playerNumber = 1;
       sessionStorage.setItem("playerAssigned", "1");
-      // Tell Firebase: "When I disconnect, delete my player1 key"
+      update(playersRef, { player1: true });
+      // CRITICAL: Set up disconnect hook immediately
       onDisconnect(ref(db, "pigGame/players/player1")).remove();
     } else {
-      waitingText.textContent =
-        "Game is full! Use Reset All if this is an error.";
+      waitingText.textContent = "Game is Full! Resetting might be needed.";
       return;
     }
   } else {
     playerNumber = Number(savedID);
-    // Ensure onDisconnect is still active even on refresh
+    // Ensure hook stays active on refresh
     onDisconnect(ref(db, `pigGame/players/player${playerNumber}`)).remove();
   }
 
-  // Update Labels
+  // Update UI Labels
   document.getElementById("name--0").textContent =
     playerNumber === 0 ? "P1 (YOU)" : "Player 1";
   document.getElementById("name--1").textContent =
     playerNumber === 1 ? "P2 (YOU)" : "Player 2";
 
-  // Check if we can start
+  // Control waiting screen
   if (players.player0 && players.player1) {
     waitingScreen.classList.add("hidden");
   } else {
@@ -86,7 +85,7 @@ onValue(playersRef, (snapshot) => {
   }
 });
 
-// --- 2. GAME STATE SYNC ---
+// --- 2. GAME SYNC ---
 onValue(gameRef, (snapshot) => {
   const state = snapshot.val();
   if (!state) {
@@ -99,7 +98,6 @@ onValue(gameRef, (snapshot) => {
   activePlayer = state.activePlayer ?? 0;
   playing = state.playing ?? true;
 
-  // Update UI
   score0El.textContent = scores[0];
   score1El.textContent = scores[1];
   current0El.textContent = activePlayer === 0 ? currentScore : 0;
@@ -117,7 +115,7 @@ onValue(gameRef, (snapshot) => {
   player0El.classList.toggle("player--active", activePlayer === 0);
   player1El.classList.toggle("player--active", activePlayer === 1);
 
-  // TURN ENFORCEMENT
+  // Turn enforcement
   const isMyTurn = playerNumber === activePlayer && playing;
   btnRoll.disabled = !isMyTurn;
   btnHold.disabled = !isMyTurn;
@@ -172,9 +170,7 @@ btnNew.addEventListener("click", () => {
   syncState(null);
 });
 
-// --- 4. ULTIMATE RESET ---
 const fullReset = () => {
-  // Wipes EVERYTHING in pigGame node
   set(ref(db, "pigGame"), null);
   sessionStorage.clear();
   window.location.reload();
