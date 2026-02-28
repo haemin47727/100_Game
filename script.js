@@ -28,64 +28,70 @@ let playing = true;
 
 const gameRef = ref(db, "pigGame/state");
 const playersRef = ref(db, "pigGame/players");
+const connectedRef = ref(db, ".info/connected");
 
-// --- 1. PLAYER ASSIGNMENT & DISCONNECT ---
-onValue(playersRef, (snapshot) => {
-  const players = snapshot.val() || {};
-  let savedID = sessionStorage.getItem("playerAssigned");
+// --- 1. ROBUST PRESENCE & ASSIGNMENT ---
+onValue(connectedRef, (snap) => {
+  if (snap.val() === true) {
+    // We are connected! Now check players
+    onValue(
+      playersRef,
+      (snapshot) => {
+        const players = snapshot.val() || {};
+        let savedID = sessionStorage.getItem("playerAssigned");
 
-  // If DB was reset but we have a saved ID, clear the local session
-  if (savedID === "0" && !players.player0) {
-    sessionStorage.removeItem("playerAssigned");
-    savedID = null;
-  }
-  if (savedID === "1" && !players.player1) {
-    sessionStorage.removeItem("playerAssigned");
-    savedID = null;
-  }
+        // Validation: If DB is empty but we have an ID, wipe the local ID
+        if (savedID === "0" && !players.player0) {
+          sessionStorage.removeItem("playerAssigned");
+          savedID = null;
+        }
+        if (savedID === "1" && !players.player1) {
+          sessionStorage.removeItem("playerAssigned");
+          savedID = null;
+        }
 
-  if (savedID === null) {
-    if (!players.player0) {
-      playerNumber = 0;
-      sessionStorage.setItem("playerAssigned", "0");
-      update(playersRef, { player0: true });
-      // CRITICAL: Set up disconnect hook immediately
-      onDisconnect(ref(db, "pigGame/players/player0")).remove();
-    } else if (!players.player1) {
-      playerNumber = 1;
-      sessionStorage.setItem("playerAssigned", "1");
-      update(playersRef, { player1: true });
-      // CRITICAL: Set up disconnect hook immediately
-      onDisconnect(ref(db, "pigGame/players/player1")).remove();
-    } else {
-      waitingText.textContent = "Game is Full! Resetting might be needed.";
-      return;
-    }
-  } else {
-    playerNumber = Number(savedID);
-    // Ensure hook stays active on refresh
-    onDisconnect(ref(db, `pigGame/players/player${playerNumber}`)).remove();
-  }
+        if (savedID === null) {
+          if (!players.player0) {
+            playerNumber = 0;
+            sessionStorage.setItem("playerAssigned", "0");
+            update(playersRef, { player0: true });
+            onDisconnect(ref(db, "pigGame/players/player0")).remove();
+          } else if (!players.player1) {
+            playerNumber = 1;
+            sessionStorage.setItem("playerAssigned", "1");
+            update(playersRef, { player1: true });
+            onDisconnect(ref(db, "pigGame/players/player1")).remove();
+          }
+        } else {
+          playerNumber = Number(savedID);
+          onDisconnect(
+            ref(db, `pigGame/players/player${playerNumber}`),
+          ).remove();
+        }
 
-  // Update UI Labels
-  document.getElementById("name--0").textContent =
-    playerNumber === 0 ? "P1 (YOU)" : "Player 1";
-  document.getElementById("name--1").textContent =
-    playerNumber === 1 ? "P2 (YOU)" : "Player 2";
+        // UI Labels
+        document.getElementById("name--0").textContent =
+          playerNumber === 0 ? "P1 (YOU)" : "Player 1";
+        document.getElementById("name--1").textContent =
+          playerNumber === 1 ? "P2 (YOU)" : "Player 2";
 
-  // Control waiting screen
-  if (players.player0 && players.player1) {
-    waitingScreen.classList.add("hidden");
-  } else {
-    waitingScreen.classList.remove("hidden");
-    waitingText.textContent =
-      playerNumber === 0
-        ? "Waiting for Player 2..."
-        : "Waiting for Player 1...";
+        // Waiting Screen Logic
+        if (players.player0 && players.player1) {
+          waitingScreen.classList.add("hidden");
+        } else {
+          waitingScreen.classList.remove("hidden");
+          waitingText.textContent =
+            playerNumber === 0
+              ? "Waiting for Player 2..."
+              : "Waiting for Player 1...";
+        }
+      },
+      { onlyOnce: false },
+    );
   }
 });
 
-// --- 2. GAME SYNC ---
+// --- 2. GAME STATE SYNC ---
 onValue(gameRef, (snapshot) => {
   const state = snapshot.val();
   if (!state) {
@@ -109,13 +115,12 @@ onValue(gameRef, (snapshot) => {
     diceOne.classList.toggle("hidden", state.dice !== 1);
   } else {
     diceEl.classList.add("hidden");
-    diceOne.classList.add("hidden");
   }
 
   player0El.classList.toggle("player--active", activePlayer === 0);
   player1El.classList.toggle("player--active", activePlayer === 1);
 
-  // Turn enforcement
+  // Button Locking
   const isMyTurn = playerNumber === activePlayer && playing;
   btnRoll.disabled = !isMyTurn;
   btnHold.disabled = !isMyTurn;
