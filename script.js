@@ -13,6 +13,7 @@ import {
 // Elements
 const waitingScreen = document.getElementById("waiting-screen");
 const waitingText = document.getElementById("waiting-text");
+const oinkEl = document.getElementById("oink-message"); // New Element
 const player0El = document.querySelector(".player--0");
 const player1El = document.querySelector(".player--1");
 const score0El = document.querySelector("#score--0");
@@ -38,7 +39,6 @@ const playersRef = ref(db, "pigGame/players");
 // --- 1. JOIN LOGIC ---
 const startApp = async () => {
   const savedID = sessionStorage.getItem("playerAssigned");
-
   if (savedID !== null) {
     playerNumber = Number(savedID);
     startMultiplayer();
@@ -54,12 +54,10 @@ const startApp = async () => {
           return currentData;
         } else return;
       });
-
       if (result.committed) {
         const players = result.snapshot.val();
-        playerNumber = players.player0 && players.player1 && !savedID ? 1 : 0;
+        playerNumber = players.player1 && players.player0 ? 1 : 0;
         sessionStorage.setItem("playerAssigned", playerNumber.toString());
-
         if (playerNumber === 0) await resetGameState();
         startMultiplayer();
       }
@@ -91,14 +89,9 @@ function startMultiplayer() {
     document.getElementById("name--1").textContent =
       playerNumber === 1 ? "P2 (YOU)" : "P2";
 
+    // Waiting screen ONLY shows if a player is missing
     if (players.player0 && players.player1) {
-      // Only hide if there isn't a greedy message or a winner message being shown
-      if (
-        !waitingText.innerHTML.includes("Oink") &&
-        !waitingText.innerHTML.includes("Wins")
-      ) {
-        waitingScreen.classList.add("hidden");
-      }
+      waitingScreen.classList.add("hidden");
     } else {
       waitingScreen.classList.remove("hidden");
       waitingText.textContent = "Waiting for Opponent...";
@@ -123,38 +116,29 @@ function startMultiplayer() {
     if (state.dice && playing) {
       diceEl.classList.remove("hidden");
       diceEl.src = `dice-${state.dice}.png`;
-    } else {
-      diceEl.classList.add("hidden");
-    }
+    } else diceEl.classList.add("hidden");
 
-    // Greedy Message Logic
+    // "Oink" Message Logic (Small text under dice)
     if (state.message) {
-      waitingScreen.classList.remove("hidden");
-      waitingText.innerHTML = `<span style="font-size: 3rem; line-height: 1.4;">${state.message}</span>`;
-
-      // Auto-hide the "Oink" message after 2 seconds
-      setTimeout(() => {
-        if (playing && playerNumber !== null) {
-          // Re-check if both players are still there before hiding
-          get(playersRef).then((snap) => {
-            const p = snap.val() || {};
-            if (p.player0 && p.player1) waitingScreen.classList.add("hidden");
-          });
-        }
-      }, 2000);
+      oinkEl.classList.remove("hidden");
+      oinkEl.innerHTML = state.message;
+      // Clear the message after 3 seconds
+      if (playerNumber === 0) {
+        setTimeout(() => update(gameRef, { message: "" }), 3000);
+      }
+    } else {
+      oinkEl.classList.add("hidden");
     }
 
     player0El.classList.toggle("player--active", activePlayer === 0);
     player1El.classList.toggle("player--active", activePlayer === 1);
 
-    // Turn Locking
     const isMyTurn = playerNumber === activePlayer && playing;
     btnRoll.disabled = !isMyTurn;
     btnHold.disabled = !isMyTurn;
     btnRoll.style.opacity = isMyTurn ? "1" : "0.3";
     btnHold.style.opacity = isMyTurn ? "1" : "0.3";
 
-    // Winner State
     if (!playing) {
       const winner = scores[0] >= 100 ? 0 : 1;
       document
@@ -182,13 +166,13 @@ btnRoll.addEventListener("click", () => {
     currentScore += dice;
     syncState(dice);
   } else {
-    // GREEDY PENALTY: Total score goes to 0
+    // Greedy Penalty: Reset total score to 0 and switch turn
     scores[activePlayer] = 0;
     currentScore = 0;
     const nextPlayer = activePlayer === 0 ? 1 : 0;
     syncState(dice, {
       activePlayer: nextPlayer,
-      message: "Oink 🐷 you were greedy!<br>You rolled a 1!",
+      message: "Oink 🐷 you were greedy! You rolled a 1!",
     });
   }
 });
@@ -196,7 +180,6 @@ btnRoll.addEventListener("click", () => {
 btnHold.addEventListener("click", () => {
   if (!playing || playerNumber !== activePlayer) return;
   scores[activePlayer] += currentScore;
-
   if (scores[activePlayer] >= 100) {
     playing = false;
     syncState(null);
@@ -207,10 +190,8 @@ btnHold.addEventListener("click", () => {
   }
 });
 
-// New Game Button - Anyone can press it to reset the board
 btnNew.addEventListener("click", () => resetGameState());
 
-// Reset All Button - Use this if the connection gets stuck
 btnReset.addEventListener("click", () => {
   set(ref(db, "pigGame"), null);
   sessionStorage.clear();
