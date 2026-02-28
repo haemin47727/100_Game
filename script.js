@@ -24,7 +24,6 @@ const btnNew = document.querySelector(".btn--new");
 const btnRoll = document.querySelector(".btn--roll");
 const btnHold = document.querySelector(".btn--hold");
 const btnReset = document.querySelector(".btn--reset");
-const btnResetMini = document.querySelector(".btn--reset-mini");
 
 // Local state
 let playerNumber = null;
@@ -36,7 +35,7 @@ let playing = true;
 const gameRef = ref(db, "pigGame/state");
 const playersRef = ref(db, "pigGame/players");
 
-// --- 1. THE ONLY JOIN FUNCTION YOU NEED ---
+// --- 1. JOIN LOGIC ---
 const startApp = async () => {
   const savedID = sessionStorage.getItem("playerAssigned");
 
@@ -45,7 +44,6 @@ const startApp = async () => {
     startMultiplayer();
   } else {
     try {
-      // Use a transaction to claim a seat safely
       const result = await runTransaction(playersRef, (currentData) => {
         if (currentData === null) currentData = {};
         if (!currentData.player0) {
@@ -54,68 +52,61 @@ const startApp = async () => {
         } else if (!currentData.player1) {
           currentData.player1 = true;
           return currentData;
-        } else {
-          return; // Game full
-        }
+        } else return;
       });
 
       if (result.committed) {
         const players = result.snapshot.val();
-        // Determine player number based on what exists now
-        playerNumber = players.player1 && players.player0 ? 1 : 0;
+        playerNumber = players.player0 && players.player1 && !savedID ? 1 : 0;
         sessionStorage.setItem("playerAssigned", playerNumber.toString());
 
-        // IF we are Player 0, we create the initial game state
-        if (playerNumber === 0) {
-          await set(gameRef, {
-            scores: [0, 0],
-            currentScore: 0,
-            activePlayer: 0,
-            playing: true,
-          });
-        }
+        if (playerNumber === 0) await resetGameState();
         startMultiplayer();
-      } else {
-        waitingText.textContent = "Game is Full! Use Reset All.";
       }
     } catch (e) {
-      console.error("Connection Error:", e);
-      waitingText.textContent = "Error connecting to Firebase.";
+      console.error(e);
     }
   }
 };
 
+async function resetGameState() {
+  await set(gameRef, {
+    scores: [0, 0],
+    currentScore: 0,
+    activePlayer: 0,
+    playing: true,
+    message: "",
+    dice: null,
+  });
+}
+
+// --- 2. MULTIPLAYER SYNC ---
 function startMultiplayer() {
-  // Cleanup on exit
   onDisconnect(ref(db, `pigGame/players/player${playerNumber}`)).remove();
 
-  // MONITOR PLAYERS
   onValue(playersRef, (snapshot) => {
     const players = snapshot.val() || {};
     document.getElementById("name--0").textContent =
-      playerNumber === 0 ? "P1 (YOU)" : "Player 1";
+      playerNumber === 0 ? "P1 (YOU)" : "P1";
     document.getElementById("name--1").textContent =
-      playerNumber === 1 ? "P2 (YOU)" : "Player 2";
+      playerNumber === 1 ? "P2 (YOU)" : "P2";
 
     if (players.player0 && players.player1) {
-      waitingScreen.classList.add("hidden");
+      // Only hide if there isn't a greedy message or a winner message being shown
+      if (
+        !waitingText.innerHTML.includes("Oink") &&
+        !waitingText.innerHTML.includes("Wins")
+      ) {
+        waitingScreen.classList.add("hidden");
+      }
     } else {
       waitingScreen.classList.remove("hidden");
-      waitingText.textContent = `You are Player ${playerNumber + 1}. Waiting...`;
+      waitingText.textContent = "Waiting for Opponent...";
     }
   });
 
-  // MONITOR GAME STATE
   onValue(gameRef, (snapshot) => {
     const state = snapshot.val();
-
-    // Auto-reload if game is reset
-    if (!state && sessionStorage.getItem("playerAssigned")) {
-      sessionStorage.clear();
-      window.location.reload();
-      return;
-    }
-
     if (!state) return;
 
     scores = state.scores || [0, 0];
@@ -128,6 +119,7 @@ function startMultiplayer() {
     current0El.textContent = activePlayer === 0 ? currentScore : 0;
     current1El.textContent = activePlayer === 1 ? currentScore : 0;
 
+    // Dice logic
     if (state.dice && playing) {
       diceEl.classList.remove("hidden");
       diceEl.src = `dice-${state.dice}.png`;
@@ -135,20 +127,41 @@ function startMultiplayer() {
       diceEl.classList.add("hidden");
     }
 
+    // Greedy Message Logic
+    if (state.message) {
+      waitingScreen.classList.remove("hidden");
+      waitingText.innerHTML = `<span style="font-size: 3rem; line-height: 1.4;">${state.message}</span>`;
+
+      // Auto-hide the "Oink" message after 2 seconds
+      setTimeout(() => {
+        if (playing && playerNumber !== null) {
+          // Re-check if both players are still there before hiding
+          get(playersRef).then((snap) => {
+            const p = snap.val() || {};
+            if (p.player0 && p.player1) waitingScreen.classList.add("hidden");
+          });
+        }
+      }, 2000);
+    }
+
     player0El.classList.toggle("player--active", activePlayer === 0);
     player1El.classList.toggle("player--active", activePlayer === 1);
 
+    // Turn Locking
     const isMyTurn = playerNumber === activePlayer && playing;
     btnRoll.disabled = !isMyTurn;
     btnHold.disabled = !isMyTurn;
     btnRoll.style.opacity = isMyTurn ? "1" : "0.3";
     btnHold.style.opacity = isMyTurn ? "1" : "0.3";
 
+    // Winner State
     if (!playing) {
       const winner = scores[0] >= 100 ? 0 : 1;
       document
         .querySelector(`.player--${winner}`)
         .classList.add("player--winner");
+      waitingScreen.classList.remove("hidden");
+      waitingText.innerHTML = `Player ${winner + 1} Wins!<br><span style="font-size: 1.5rem">Press "New Game" to play again</span>`;
     } else {
       player0El.classList.remove("player--winner");
       player1El.classList.remove("player--winner");
@@ -156,48 +169,52 @@ function startMultiplayer() {
   });
 }
 
-function syncState(dice = null) {
-  set(gameRef, { scores, currentScore, activePlayer, playing, dice });
+function syncState(dice = null, extra = {}) {
+  set(gameRef, { scores, currentScore, activePlayer, playing, dice, ...extra });
 }
 
-// EVENTS
+// --- 3. ACTIONS ---
 btnRoll.addEventListener("click", () => {
   if (!playing || playerNumber !== activePlayer) return;
   const dice = Math.trunc(Math.random() * 6) + 1;
-  if (dice !== 1) currentScore += dice;
-  else {
+
+  if (dice !== 1) {
+    currentScore += dice;
+    syncState(dice);
+  } else {
+    // GREEDY PENALTY: Total score goes to 0
+    scores[activePlayer] = 0;
     currentScore = 0;
-    activePlayer = activePlayer === 0 ? 1 : 0;
+    const nextPlayer = activePlayer === 0 ? 1 : 0;
+    syncState(dice, {
+      activePlayer: nextPlayer,
+      message: "Oink 🐷 you were greedy!<br>You rolled a 1!",
+    });
   }
-  syncState(dice);
 });
 
 btnHold.addEventListener("click", () => {
   if (!playing || playerNumber !== activePlayer) return;
   scores[activePlayer] += currentScore;
-  if (scores[activePlayer] >= 100) playing = false;
-  else {
+
+  if (scores[activePlayer] >= 100) {
+    playing = false;
+    syncState(null);
+  } else {
     currentScore = 0;
-    activePlayer = activePlayer === 0 ? 1 : 0;
+    const nextPlayer = activePlayer === 0 ? 1 : 0;
+    syncState(null, { activePlayer: nextPlayer });
   }
-  syncState();
 });
 
-btnNew.addEventListener("click", () => {
-  set(gameRef, {
-    scores: [0, 0],
-    currentScore: 0,
-    activePlayer: 0,
-    playing: true,
-    dice: null,
-  });
-});
+// New Game Button - Anyone can press it to reset the board
+btnNew.addEventListener("click", () => resetGameState());
 
+// Reset All Button - Use this if the connection gets stuck
 btnReset.addEventListener("click", () => {
   set(ref(db, "pigGame"), null);
   sessionStorage.clear();
   window.location.reload();
 });
 
-// INITIALIZE
 startApp();
