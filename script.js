@@ -1,6 +1,14 @@
 "use strict";
 
-import { db, ref, set, onValue, update, onDisconnect } from "./firebase.js";
+import {
+  db,
+  ref,
+  set,
+  onValue,
+  update,
+  onDisconnect,
+  get,
+} from "./firebase.js";
 
 // Elements
 const waitingScreen = document.getElementById("waiting-screen");
@@ -20,6 +28,7 @@ const btnResetMini = document.querySelector(".btn--reset-mini");
 
 // Local state
 let playerNumber = null;
+let isJoining = false; // The Gatekeeper
 let scores = [0, 0];
 let currentScore = 0;
 let activePlayer = 0;
@@ -28,57 +37,57 @@ let playing = true;
 const gameRef = ref(db, "pigGame/state");
 const playersRef = ref(db, "pigGame/players");
 
-// --- 1. THE STABILIZED JOINING LOGIC ---
+// --- 1. THE JOINING LOGIC ---
 
-const initConnection = () => {
+const initConnection = async () => {
+  if (isJoining) return;
+  isJoining = true;
+
   const savedID = sessionStorage.getItem("playerAssigned");
 
   if (savedID !== null) {
     playerNumber = Number(savedID);
     startMultiplayerLogic();
   } else {
-    // Look at database ONCE to pick a free slot
-    onValue(
-      playersRef,
-      (snapshot) => {
-        if (playerNumber !== null) return;
+    // Use GET instead of onValue to check once without looping
+    const snapshot = await get(playersRef);
+    const players = snapshot.val() || {};
 
-        const players = snapshot.val() || {};
-        if (!players.player0) {
-          playerNumber = 0;
-          sessionStorage.setItem("playerAssigned", "0");
-          update(playersRef, { player0: true });
-        } else if (!players.player1) {
-          playerNumber = 1;
-          sessionStorage.setItem("playerAssigned", "1");
-          update(playersRef, { player1: true });
-        } else {
-          waitingText.textContent = "Game is Full! Reset required.";
-          return;
-        }
+    if (!players.player0) {
+      playerNumber = 0;
+    } else if (!players.player1) {
+      playerNumber = 1;
+    } else {
+      waitingText.textContent = "Game Full! Resetting...";
+      isJoining = false;
+      return;
+    }
 
-        startMultiplayerLogic();
-      },
-      { onlyOnce: true },
-    );
+    // Save to Firebase and Session
+    sessionStorage.setItem("playerAssigned", playerNumber.toString());
+    const updates = {};
+    updates[`player${playerNumber}`] = true;
+    await update(playersRef, updates);
+
+    startMultiplayerLogic();
   }
 };
 
 function startMultiplayerLogic() {
-  // A. Clean up if tab closes
+  // Clean up if player leaves
   onDisconnect(ref(db, `pigGame/players/player${playerNumber}`)).remove();
 
-  // B. Monitor Player Presence (Handles Waiting Screen)
+  // MONITOR PLAYERS (Waiting Screen)
   onValue(playersRef, (snapshot) => {
     const players = snapshot.val() || {};
 
-    // Update Player Name UI
+    // UI Labels
     document.getElementById("name--0").textContent =
       playerNumber === 0 ? "P1 (YOU)" : "Player 1";
     document.getElementById("name--1").textContent =
       playerNumber === 1 ? "P2 (YOU)" : "Player 2";
 
-    // Show/Hide waiting screen based on BOTH players being true
+    // GAME START CHECK
     if (players.player0 === true && players.player1 === true) {
       waitingScreen.classList.add("hidden");
     } else {
@@ -90,23 +99,19 @@ function startMultiplayerLogic() {
     }
   });
 
-  // C. Monitor Game State Sync
+  // MONITOR GAME STATE
   onValue(gameRef, (snapshot) => {
     const state = snapshot.val();
-
-    // If game node is deleted (Reset All), force a fresh start
-    if (!state && sessionStorage.getItem("playerAssigned") !== null) {
+    if (!state && sessionStorage.getItem("playerAssigned")) {
       sessionStorage.clear();
       window.location.reload();
       return;
     }
-
     if (!state) {
       if (playerNumber === 0) syncState();
       return;
     }
 
-    // Sync local variables with Firebase
     scores = state.scores || [0, 0];
     currentScore = state.currentScore || 0;
     activePlayer = state.activePlayer ?? 0;
@@ -128,7 +133,6 @@ function startMultiplayerLogic() {
     player0El.classList.toggle("player--active", activePlayer === 0);
     player1El.classList.toggle("player--active", activePlayer === 1);
 
-    // Turn Locking Logic
     const isMyTurn = playerNumber === activePlayer && playing;
     btnRoll.disabled = !isMyTurn;
     btnHold.disabled = !isMyTurn;
@@ -151,8 +155,7 @@ function syncState(dice = null) {
   set(gameRef, { scores, currentScore, activePlayer, playing, dice });
 }
 
-// --- 2. GAME ACTIONS ---
-
+// --- 2. ACTIONS ---
 btnRoll.addEventListener("click", () => {
   if (!playing || playerNumber !== activePlayer) return;
   const dice = Math.trunc(Math.random() * 6) + 1;
@@ -186,7 +189,6 @@ btnNew.addEventListener("click", () => {
 });
 
 const fullReset = () => {
-  // Clear the entire game path in Firebase
   set(ref(db, "pigGame"), null);
   sessionStorage.clear();
   window.location.reload();
@@ -195,5 +197,5 @@ const fullReset = () => {
 btnReset.addEventListener("click", fullReset);
 btnResetMini.addEventListener("click", fullReset);
 
-// Start the app
+// Start
 initConnection();
