@@ -20,7 +20,7 @@ const btnResetMini = document.querySelector(".btn--reset-mini");
 const diceOne = document.querySelector(".one");
 
 // Local state
-let playerNumber = null; // 0 or 1
+let playerNumber = null;
 let scores = [0, 0];
 let currentScore = 0;
 let activePlayer = 0;
@@ -48,11 +48,11 @@ onValue(playersRef, (snapshot) => {
     playerNumber = Number(assigned);
   }
 
-  // Update UI Labels
+  // Visual labels so you know which tab you are
   document.getElementById("name--0").textContent =
-    playerNumber === 0 ? "Player 1 (YOU)" : "Player 1";
+    playerNumber === 0 ? "P1 (YOU)" : "Player 1";
   document.getElementById("name--1").textContent =
-    playerNumber === 1 ? "Player 2 (YOU)" : "Player 2";
+    playerNumber === 1 ? "P2 (YOU)" : "Player 2";
 
   if (players.player0 && players.player1) {
     waitingScreen.classList.add("hidden");
@@ -68,29 +68,40 @@ onValue(playersRef, (snapshot) => {
 // --- 2. SYNC STATE FROM FIREBASE ---
 onValue(gameRef, (snapshot) => {
   const state = snapshot.val();
+
+  // Initialize game if it doesn't exist (Only Player 0 does this)
   if (!state) {
-    if (playerNumber === 0) syncState();
+    if (playerNumber === 0) {
+      scores = [0, 0];
+      currentScore = 0;
+      activePlayer = 0;
+      playing = true;
+      syncState();
+    }
     return;
   }
 
+  // Update local variables from Firebase
   scores = state.scores || [0, 0];
-  currentScore = state.currentScore;
-  activePlayer = state.activePlayer;
-  playing = state.playing;
+  currentScore = state.currentScore || 0;
+  activePlayer = state.activePlayer ?? 0;
+  playing = state.playing ?? true;
 
-  // Update Total Scores
+  // Update UI Scores
   score0El.textContent = scores[0];
   score1El.textContent = scores[1];
-
-  // Update Current Scores
   current0El.textContent = activePlayer === 0 ? currentScore : 0;
   current1El.textContent = activePlayer === 1 ? currentScore : 0;
 
-  // Dice Visibility
-  if (state.dice && playing) {
+  // Dice Logic
+  if (state.dice && playing && state.dice !== 1) {
     diceEl.classList.remove("hidden");
     diceEl.src = `dice-${state.dice}.png`;
-    diceOne.classList.toggle("hidden", state.dice !== 1);
+    diceOne.classList.add("hidden");
+  } else if (state.dice === 1) {
+    diceEl.classList.remove("hidden");
+    diceEl.src = `dice-1.png`;
+    diceOne.classList.remove("hidden");
   } else {
     diceEl.classList.add("hidden");
     diceOne.classList.add("hidden");
@@ -105,14 +116,23 @@ onValue(gameRef, (snapshot) => {
     document
       .querySelector(`.player--${winner}`)
       .classList.add("player--winner");
+    document
+      .querySelector(`.player--${winner}`)
+      .classList.remove("player--active");
     btnRoll.disabled = true;
     btnHold.disabled = true;
   } else {
     player0El.classList.remove("player--winner");
     player1El.classList.remove("player--winner");
+
+    // TURN ENFORCEMENT: Only the active player can click
     const isMyTurn = playerNumber === activePlayer;
     btnRoll.disabled = !isMyTurn;
     btnHold.disabled = !isMyTurn;
+
+    // Visual feedback for buttons
+    btnRoll.style.opacity = isMyTurn ? "1" : "0.5";
+    btnHold.style.opacity = isMyTurn ? "1" : "0.5";
   }
 });
 
@@ -130,7 +150,7 @@ btnRoll.addEventListener("click", () => {
     currentScore += dice;
     syncState(dice);
   } else {
-    // Rolled a 1: Lose current score and switch
+    // Rolled a 1: Auto-switch players
     currentScore = 0;
     activePlayer = activePlayer === 0 ? 1 : 0;
     syncState(1);
@@ -140,7 +160,6 @@ btnRoll.addEventListener("click", () => {
 btnHold.addEventListener("click", () => {
   if (!playing || playerNumber !== activePlayer) return;
 
-  // Add current score to the CORRECT player
   scores[activePlayer] += currentScore;
 
   if (scores[activePlayer] >= 100) {
@@ -153,14 +172,15 @@ btnHold.addEventListener("click", () => {
 });
 
 btnNew.addEventListener("click", () => {
+  // Reset everything to start fresh
   scores = [0, 0];
   currentScore = 0;
   activePlayer = 0;
   playing = true;
-  syncState();
+  syncState(null); // Clear dice on new game
 });
 
-// --- 4. RESET ---
+// --- 4. HARD RESET ---
 const fullReset = () => {
   set(ref(db, "pigGame"), null);
   sessionStorage.clear();
