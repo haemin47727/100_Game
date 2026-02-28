@@ -36,96 +36,60 @@ let playing = true;
 const gameRef = ref(db, "pigGame/state");
 const playersRef = ref(db, "pigGame/players");
 
-// --- 1. THE ATOMIC JOIN (Prevents Blinking) ---
-const joinGame = async () => {
+// --- 1. THE ONLY JOIN FUNCTION YOU NEED ---
+const startApp = async () => {
   const savedID = sessionStorage.getItem("playerAssigned");
 
   if (savedID !== null) {
     playerNumber = Number(savedID);
     startMultiplayer();
-    return;
-  }
+  } else {
+    try {
+      // Use a transaction to claim a seat safely
+      const result = await runTransaction(playersRef, (currentData) => {
+        if (currentData === null) currentData = {};
+        if (!currentData.player0) {
+          currentData.player0 = true;
+          return currentData;
+        } else if (!currentData.player1) {
+          currentData.player1 = true;
+          return currentData;
+        } else {
+          return; // Game full
+        }
+      });
 
-  // Transaction: This "locks" the players node while we check it
-  try {
-    const result = await runTransaction(playersRef, (currentData) => {
-      if (currentData === null) currentData = {};
+      if (result.committed) {
+        const players = result.snapshot.val();
+        // Determine player number based on what exists now
+        playerNumber = players.player1 && players.player0 ? 1 : 0;
+        sessionStorage.setItem("playerAssigned", playerNumber.toString());
 
-      if (!currentData.player0) {
-        currentData.player0 = true;
-        return currentData; // Claim Player 0
-      } else if (!currentData.player1) {
-        currentData.player1 = true;
-        return currentData; // Claim Player 1
+        // IF we are Player 0, we create the initial game state
+        if (playerNumber === 0) {
+          await set(gameRef, {
+            scores: [0, 0],
+            currentScore: 0,
+            activePlayer: 0,
+            playing: true,
+          });
+        }
+        startMultiplayer();
       } else {
-        return; // Abort: Game is full
+        waitingText.textContent = "Game is Full! Use Reset All.";
       }
-    });
-
-    if (result.committed) {
-      // Logic to figure out which one we actually got
-      const players = result.snapshot.val();
-      // If we were the one who set player1, and player0 was already there
-      if (players.player1 && !sessionStorage.getItem("playerAssigned")) {
-        // This logic is a bit tricky, usually we check which key was added
-        // For simplicity in this Pig Game setup:
-        playerNumber =
-          result.snapshot.child("player1").exists() &&
-          !result.snapshot.child("player0").exists()
-            ? 0
-            : 1;
-
-        // Let's refine the ID check:
-        const snap = result.snapshot.val();
-        // If I was the first one there, I'm 0. If there were already players, I'm 1.
-        // Actually, let's just re-read the specific slot we filled.
-      }
-
-      // Better way: Re-check snapshot to see which one we are
-      // Since transactions are complex, let's use a simpler "Check and Set"
-      // but only if the previous logic didn't settle it.
+    } catch (e) {
+      console.error("Connection Error:", e);
+      waitingText.textContent = "Error connecting to Firebase.";
     }
-  } catch (e) {
-    console.error("Join failed", e);
   }
-};
-
-// --- SIMPLIFIED BULLETPROOF JOIN ---
-const bulletproofJoin = () => {
-  const savedID = sessionStorage.getItem("playerAssigned");
-  if (savedID !== null) {
-    playerNumber = Number(savedID);
-    startMultiplayer();
-    return;
-  }
-
-  // Only run this once
-  onValue(
-    playersRef,
-    (snapshot) => {
-      if (playerNumber !== null) return;
-      const players = snapshot.val() || {};
-
-      if (!players.player0) {
-        playerNumber = 0;
-        sessionStorage.setItem("playerAssigned", "0");
-        update(playersRef, { player0: true });
-      } else if (!players.player1) {
-        playerNumber = 1;
-        sessionStorage.setItem("playerAssigned", "1");
-        update(playersRef, { player1: true });
-      }
-
-      if (playerNumber !== null) startMultiplayer();
-    },
-    { onlyOnce: true },
-  );
 };
 
 function startMultiplayer() {
+  // Cleanup on exit
   onDisconnect(ref(db, `pigGame/players/player${playerNumber}`)).remove();
 
-  // MONITOR OTHERS
+  // MONITOR PLAYERS
   onValue(playersRef, (snapshot) => {
     const players = snapshot.val() || {};
     document.getElementById("name--0").textContent =
@@ -141,18 +105,18 @@ function startMultiplayer() {
     }
   });
 
-  // MONITOR GAME
+  // MONITOR GAME STATE
   onValue(gameRef, (snapshot) => {
     const state = snapshot.val();
+
+    // Auto-reload if game is reset
     if (!state && sessionStorage.getItem("playerAssigned")) {
       sessionStorage.clear();
       window.location.reload();
       return;
     }
-    if (!state) {
-      if (playerNumber === 0) syncState();
-      return;
-    }
+
+    if (!state) return;
 
     scores = state.scores || [0, 0];
     currentScore = state.currentScore || 0;
@@ -181,8 +145,9 @@ function startMultiplayer() {
     btnHold.style.opacity = isMyTurn ? "1" : "0.3";
 
     if (!playing) {
+      const winner = scores[0] >= 100 ? 0 : 1;
       document
-        .querySelector(`.player--${scores[0] >= 100 ? 0 : 1}`)
+        .querySelector(`.player--${winner}`)
         .classList.add("player--winner");
     } else {
       player0El.classList.remove("player--winner");
@@ -195,7 +160,7 @@ function syncState(dice = null) {
   set(gameRef, { scores, currentScore, activePlayer, playing, dice });
 }
 
-// Button Events (Keep your existing event listeners here)
+// EVENTS
 btnRoll.addEventListener("click", () => {
   if (!playing || playerNumber !== activePlayer) return;
   const dice = Math.trunc(Math.random() * 6) + 1;
@@ -218,10 +183,21 @@ btnHold.addEventListener("click", () => {
   syncState();
 });
 
+btnNew.addEventListener("click", () => {
+  set(gameRef, {
+    scores: [0, 0],
+    currentScore: 0,
+    activePlayer: 0,
+    playing: true,
+    dice: null,
+  });
+});
+
 btnReset.addEventListener("click", () => {
   set(ref(db, "pigGame"), null);
   sessionStorage.clear();
   window.location.reload();
 });
 
-bulletproofJoin();
+// INITIALIZE
+startApp();
