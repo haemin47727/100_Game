@@ -29,11 +29,11 @@ let playing = true;
 const gameRef = ref(db, "pigGame/state");
 const playersRef = ref(db, "pigGame/players");
 
-// --- 1. STRICT JOINING LOGIC ---
+// --- 1. THE JOINING HANDSHAKE & PRESENCE ---
 onValue(playersRef, (snapshot) => {
   const players = snapshot.val() || {};
 
-  // 1. Determine who I am
+  // 1. Identify who YOU are
   if (playerNumber === null) {
     const savedID = sessionStorage.getItem("playerAssigned");
     if (savedID !== null) {
@@ -51,36 +51,35 @@ onValue(playersRef, (snapshot) => {
     }
   }
 
-  // 2. Set up the "I'm leaving" trigger
+  // 2. Setup Auto-Disconnect (Presence)
   if (playerNumber !== null) {
     onDisconnect(ref(db, `pigGame/players/player${playerNumber}`)).remove();
   }
 
-  // 3. UI Updates
+  // 3. Update Labels so you know your slot
   document.getElementById("name--0").textContent =
     playerNumber === 0 ? "P1 (YOU)" : "Player 1";
   document.getElementById("name--1").textContent =
     playerNumber === 1 ? "P2 (YOU)" : "Player 2";
 
-  // 4. THE FIX: Only hide screen if BOTH player0 and player1 are EXACTLY true
+  // 4. THE SYNC FIX: Screen only hides if BOTH are explicitly true
   if (players.player0 === true && players.player1 === true) {
     waitingScreen.classList.add("hidden");
-    console.log("Both players detected. Game Start.");
   } else {
     waitingScreen.classList.remove("hidden");
-    waitingText.textContent =
-      playerNumber === 0
-        ? "Waiting for Player 2..."
-        : "Waiting for Player 1...";
-    console.log("Waiting for opponent...");
+    if (playerNumber === 0) {
+      waitingText.textContent = "You are P1. Waiting for P2 to join...";
+    } else if (playerNumber === 1) {
+      waitingText.textContent = "You are P2. Syncing with P1...";
+    }
   }
 });
 
-// --- 2. STATE SYNC ---
+// --- 2. GAME STATE SYNC ---
 onValue(gameRef, (snapshot) => {
   const state = snapshot.val();
 
-  // If database is wiped, force everyone to re-join
+  // If the other player reset the game, we must refresh to re-join
   if (!state && sessionStorage.getItem("playerAssigned") !== null) {
     sessionStorage.clear();
     window.location.reload();
@@ -113,7 +112,7 @@ onValue(gameRef, (snapshot) => {
   player0El.classList.toggle("player--active", activePlayer === 0);
   player1El.classList.toggle("player--active", activePlayer === 1);
 
-  // Button locking
+  // Turn Enforcement
   const isMyTurn = playerNumber === activePlayer && playing;
   btnRoll.disabled = !isMyTurn;
   btnHold.disabled = !isMyTurn;
